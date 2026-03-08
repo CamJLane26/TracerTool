@@ -10,6 +10,8 @@ import {
   Cartographic,
   LabelStyle,
   VerticalOrigin,
+  ColorMaterialProperty,
+  ConstantProperty,
 } from "cesium";
 import type { Entity } from "cesium";
 
@@ -31,6 +33,10 @@ const GROUND_ROUTE_COLOR = Color.fromCssColorString("#22dd88");
 const AIR_ROUTE_COLOR = Color.fromCssColorString("#5599ff");
 const MARKER_COLOR = Color.fromCssColorString("#ff9933");
 const GHOST_COLOR = Color.fromCssColorString("#ffffff").withAlpha(0.35);
+// Hover highlight: a bright warm white-yellow; looks great on both green and blue routes
+const HOVER_COLOR = Color.fromCssColorString("#ffe566");
+const NORMAL_WIDTH = 3;
+const HOVER_WIDTH = 6;
 
 function pickPosition(
   viewer: Viewer,
@@ -48,6 +54,15 @@ function pickPosition(
   return pos ?? undefined;
 }
 
+/** Apply highlight styling to a route leg entity. */
+function applyHover(entity: Entity, isHover: boolean, baseColor?: Color) {
+  const pl = entity.polyline;
+  if (!pl) return;
+  const color = isHover ? HOVER_COLOR : (baseColor ?? GROUND_ROUTE_COLOR);
+  pl.material = new ColorMaterialProperty(color) as unknown as typeof pl.material;
+  pl.width = new ConstantProperty(isHover ? HOVER_WIDTH : NORMAL_WIDTH) as unknown as typeof pl.width;
+}
+
 export function CesiumViewer({
   routes,
   markers,
@@ -61,6 +76,9 @@ export function CesiumViewer({
   // Keep mutable refs for the event-handler closure (avoid stale closures)
   const routesRef = useRef(routes);
   const drawingRouteIdRef = useRef(drawingRouteId);
+
+  // Registry: maps each route-leg Entity → its base Color, used for hover restore
+  const routeLegMapRef = useRef<Map<object, Color>>(new Map());
 
   // Sync refs on every render
   routesRef.current = routes;
@@ -87,7 +105,7 @@ export function CesiumViewer({
       selectionIndicator: false,
     });
 
-    // Cesium credit container: move it so it doesn't overlap the UI
+    // Shrink credit display
     const creditContainer = viewer.cesiumWidget.creditContainer as HTMLElement;
     creditContainer.style.fontSize = "9px";
 
@@ -104,9 +122,9 @@ export function CesiumViewer({
     const viewer = viewerRef.current;
     if (!viewer || viewer.isDestroyed()) return;
 
-    // Remove all non-ghost entities
     viewer.entities.removeAll();
-
+    // Clear the leg registry — entities just got destroyed
+    routeLegMapRef.current.clear();
 
     for (const route of routes) {
       const isAir = route.type === "air";
@@ -140,18 +158,21 @@ export function CesiumViewer({
         });
       }
 
-      // Draw tessellated leg polylines
+      // Draw tessellated leg polylines and register them for hover
       const segments = tessellateRoute(route);
       for (const seg of segments) {
-        viewer.entities.add({
+        const legEntity = viewer.entities.add({
           polyline: {
             positions: seg.positions,
-            width: 3,
-            material: routeColor,
-            arcType: ArcType.NONE,
+            width: NORMAL_WIDTH,
+            material: new ColorMaterialProperty(routeColor),
+            // Ground routes must use GEODESIC (or RHUMB) when clampToGround is true.
+            // Air routes use NONE to draw straight lines through 3D space.
+            arcType: isAir ? ArcType.NONE : ArcType.GEODESIC,
             clampToGround: !isAir,
           },
         });
+        routeLegMapRef.current.set(legEntity, routeColor);
       }
     }
 
@@ -195,13 +216,23 @@ export function CesiumViewer({
     let ghostLine: Entity | null = null;
     let ghostDot: Entity | null = null;
 
-    // v: a guaranteed-non-null alias used inside closures (safe: we returned early if null)
+    // Currently hovered route leg entity (for restoring on mouse-out)
+    let hoveredLegEntity: Entity | null = null;
+
+    // v: guaranteed-non-null alias (safe — we returned early if null/destroyed)
     const v = viewer as NonNullable<typeof viewer>;
 
     function clearGhost() {
       if (v.isDestroyed()) { ghostLine = null; ghostDot = null; return; }
       if (ghostLine) { v.entities.remove(ghostLine); ghostLine = null; }
       if (ghostDot) { v.entities.remove(ghostDot); ghostDot = null; }
+    }
+
+    function restoreHovered() {
+      if (!hoveredLegEntity) return;
+      const baseColor = routeLegMapRef.current.get(hoveredLegEntity);
+      if (baseColor) applyHover(hoveredLegEntity, false, baseColor);
+      hoveredLegEntity = null;
     }
 
     function updateGhost(mouseWorldPos: Cartesian3) {
@@ -236,20 +267,47 @@ export function CesiumViewer({
       });
     }
 
-    // Mouse move → update ghost line
+    // Mouse move → ghost line when drawing, leg highlight when idle
     handler.setInputAction((event: { endPosition: Cartesian2 }) => {
-      if (!drawingRouteIdRef.current) { clearGhost(); return; }
-      const pos = pickPosition(v, event.endPosition);
-      if (!pos) return;
+      if (drawingRouteIdRef.current) {
+        // ── Drawing mode: show ghost preview line ────────────────────────
+        restoreHovered(); // clear any hover if we entered drawing mid-hover
+        const pos = pickPosition(v, event.endPosition);
+        if (!pos) return;
 
-      const dRouteId = drawingRouteIdRef.current;
-      const route = routesRef.current.find((r) => r.id === dRouteId);
-      if (route?.type === "air" && route.altitude !== undefined) {
-        const carto = Cartographic.fromCartesian(pos);
-        const airPos = Cartesian3.fromRadians(carto.longitude, carto.latitude, route.altitude);
-        updateGhost(airPos);
+        const dRouteId = drawingRouteIdRef.current;
+        const route = routesRef.current.find((r) => r.id === dRouteId);
+        if (route?.type === "air" && route.altitude !== undefined) {
+          const carto = Cartographic.fromCartesian(pos);
+          updateGhost(Cartesian3.fromRadians(carto.longitude, carto.latitude, route.altitude));
+        } else {
+          updateGhost(pos);
+        }
       } else {
-        updateGhost(pos);
+        // ── Idle mode: highlight hovered route leg ───────────────────────
+        clearGhost();
+        // Use an 8×8 pixel pick region so thin (3px) polylines are easy to hit
+        const picked = v.scene.pick(event.endPosition, 8, 8);
+        // For regular entities: picked.id is the Entity.
+        // For clampToGround entities: picked.id may be on the primitive.
+        const pickedEntity: Entity | null =
+          (picked?.id as Entity | undefined) ??
+          (picked?.primitive?.id as Entity | undefined) ??
+          null;
+        const isLeg = pickedEntity ? routeLegMapRef.current.has(pickedEntity) : false;
+
+        if (hoveredLegEntity && hoveredLegEntity !== pickedEntity) {
+          restoreHovered();
+        }
+
+        if (isLeg && pickedEntity && pickedEntity !== hoveredLegEntity) {
+          applyHover(pickedEntity, true);
+          hoveredLegEntity = pickedEntity;
+          // Change cursor to indicate the route is clickable
+          v.scene.canvas.style.cursor = "pointer";
+        } else if (!isLeg) {
+          v.scene.canvas.style.cursor = drawingRouteIdRef.current ? "crosshair" : "";
+        }
       }
     }, ScreenSpaceEventType.MOUSE_MOVE);
 
@@ -312,8 +370,10 @@ export function CesiumViewer({
     }, ScreenSpaceEventType.RIGHT_CLICK);
 
     return () => {
+      restoreHovered();
       clearGhost();
       if (!v.isDestroyed()) {
+        v.scene.canvas.style.cursor = "";
         v.scene.canvas.removeEventListener("contextmenu", preventContextMenu);
       }
       if (!handler.isDestroyed()) handler.destroy();
