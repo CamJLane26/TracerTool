@@ -7,9 +7,17 @@ interface RouteEditorProps {
   drawingRouteId: string | null;
   onUpdateLegSpeed: (routeId: string, legIndex: number, speed: number) => void;
   onRemoveWaypoint: (routeId: string, index: number) => void;
+  onMoveWaypoint: (routeId: string, waypointIndex: number, newPosition: Cartesian3) => void;
   onAddWaypoint: (routeId: string, position: Cartesian3) => void;
   onStartDrawing: (routeId: string, altitude?: number) => void;
   onFinishDrawing: () => void;
+}
+
+interface EditState {
+  waypointIndex: number;
+  lat: string;
+  lon: string;
+  alt: string;
 }
 
 function cartesianToLatLonAlt(c: Cartesian3): { lat: number; lon: number; alt: number } {
@@ -26,11 +34,13 @@ export function RouteEditor({
   drawingRouteId,
   onUpdateLegSpeed,
   onRemoveWaypoint,
+  onMoveWaypoint,
   onAddWaypoint,
   onStartDrawing,
   onFinishDrawing,
 }: RouteEditorProps) {
   const [altitudeInput, setAltitudeInput] = useState<string>("10000");
+  const [editState, setEditState] = useState<EditState | null>(null);
 
   if (!route) {
     return (
@@ -42,6 +52,28 @@ export function RouteEditor({
 
   const isDrawing = drawingRouteId === route.id;
   const hasWaypoints = route.waypoints.length > 0;
+
+  function beginEdit(index: number) {
+    const wp = route!.waypoints[index];
+    const { lat, lon, alt } = cartesianToLatLonAlt(wp.position);
+    setEditState({
+      waypointIndex: index,
+      lat: lat.toFixed(6),
+      lon: lon.toFixed(6),
+      alt: alt.toFixed(1),
+    });
+  }
+
+  function commitEdit() {
+    if (!editState || !route) return;
+    const lat = parseFloat(editState.lat);
+    const lon = parseFloat(editState.lon);
+    const alt = parseFloat(editState.alt) || 0;
+    if (Number.isNaN(lat) || Number.isNaN(lon)) return;
+    const newPos = Cartesian3.fromDegrees(lon, lat, alt);
+    onMoveWaypoint(route.id, editState.waypointIndex, newPos);
+    setEditState(null);
+  }
 
   return (
     <div style={styles.container}>
@@ -98,25 +130,106 @@ export function RouteEditor({
       <div style={styles.waypointList}>
         {route.waypoints.map((wp, i) => {
           const { lat, lon, alt } = cartesianToLatLonAlt(wp.position);
+          const isEditing = editState?.waypointIndex === i;
+
           return (
             <div key={i} style={styles.waypointItem}>
-              <div style={styles.waypointInfo}>
-                <span style={styles.waypointIndex}>{i}</span>
-                <span style={styles.waypointCoords}>
-                  {lat.toFixed(4)}°, {lon.toFixed(4)}° @ {alt.toFixed(0)}m
-                </span>
-                <span style={styles.waypointTime}>
-                  {(wp.offsetTimeMs / 1000).toFixed(1)}s
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => onRemoveWaypoint(route.id, i)}
-                style={styles.removeBtn}
-                title="Remove waypoint"
-              >
-                ×
-              </button>
+              {/* ── Normal view ─────────────────────────────────────────── */}
+              {!isEditing && (
+                <>
+                  <div style={styles.waypointInfo}>
+                    <span style={styles.waypointIndex}>WP{i}</span>
+                    <span style={styles.waypointCoords}>
+                      {lat.toFixed(4)}°, {lon.toFixed(4)}°
+                    </span>
+                    <span style={styles.waypointAlt}>
+                      ↕ {alt.toFixed(0)} m
+                    </span>
+                    <span style={styles.waypointTime}>
+                      ⏱ {(wp.offsetTimeMs / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+                  <div style={styles.waypointActions}>
+                    <button
+                      type="button"
+                      onClick={() => beginEdit(i)}
+                      style={styles.editBtn}
+                      title="Edit position"
+                    >
+                      ✏️
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveWaypoint(route.id, i)}
+                      style={styles.removeBtn}
+                      title="Remove waypoint"
+                    >
+                      ×
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {/* ── Edit form ───────────────────────────────────────────── */}
+              {isEditing && editState && (
+                <div style={styles.editForm}>
+                  <div style={styles.editHeader}>
+                    <span style={styles.waypointIndex}>WP{i} — edit position</span>
+                  </div>
+
+                  <div style={styles.editFields}>
+                    <label style={styles.editLabel}>Lat (°)</label>
+                    <input
+                      type="number"
+                      value={editState.lat}
+                      onChange={(e) =>
+                        setEditState({ ...editState, lat: e.target.value })
+                      }
+                      step={0.0001}
+                      style={styles.editInput}
+                    />
+
+                    <label style={styles.editLabel}>Lon (°)</label>
+                    <input
+                      type="number"
+                      value={editState.lon}
+                      onChange={(e) =>
+                        setEditState({ ...editState, lon: e.target.value })
+                      }
+                      step={0.0001}
+                      style={styles.editInput}
+                    />
+
+                    <label style={styles.editLabel}>Alt (m)</label>
+                    <input
+                      type="number"
+                      value={editState.alt}
+                      onChange={(e) =>
+                        setEditState({ ...editState, alt: e.target.value })
+                      }
+                      step={10}
+                      style={styles.editInput}
+                    />
+                  </div>
+
+                  <div style={styles.editActions}>
+                    <button
+                      type="button"
+                      onClick={commitEdit}
+                      style={styles.confirmBtn}
+                    >
+                      ✓ Apply
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditState(null)}
+                      style={styles.cancelEditBtn}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
@@ -198,7 +311,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   waypointItem: {
     display: "flex",
-    alignItems: "center",
+    alignItems: "flex-start",
     justifyContent: "space-between",
     padding: "6px 8px",
     backgroundColor: "#2a2a2a",
@@ -218,9 +331,30 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#bbb",
     fontFamily: "monospace",
   },
+  waypointAlt: {
+    color: "#8cf",
+    fontFamily: "monospace",
+    fontSize: 11,
+  },
   waypointTime: {
     color: "#9af",
     fontSize: 11,
+  },
+  waypointActions: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-end",
+    gap: 4,
+  },
+  editBtn: {
+    padding: "2px 6px",
+    fontSize: 13,
+    lineHeight: 1,
+    cursor: "pointer",
+    background: "none",
+    border: "none",
+    color: "#9cf",
+    opacity: 0.75,
   },
   removeBtn: {
     padding: "2px 8px",
@@ -241,6 +375,61 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid #444",
     borderRadius: 4,
   },
+  // ── Edit form styles ────────────────────────────────────────────────────────
+  editForm: {
+    width: "100%",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
+  editHeader: {
+    marginBottom: 4,
+  },
+  editFields: {
+    display: "grid",
+    gridTemplateColumns: "auto 1fr",
+    gap: "6px 8px",
+    alignItems: "center",
+  },
+  editLabel: {
+    color: "#9cf",
+    fontSize: 11,
+    whiteSpace: "nowrap" as const,
+  },
+  editInput: {
+    padding: "4px 6px",
+    fontSize: 12,
+    backgroundColor: "#1a1a1a",
+    border: "1px solid #555",
+    borderRadius: 4,
+    color: "#eee",
+    width: "100%",
+  },
+  editActions: {
+    display: "flex",
+    gap: 6,
+    justifyContent: "flex-end",
+  },
+  confirmBtn: {
+    padding: "4px 12px",
+    fontSize: 12,
+    cursor: "pointer",
+    backgroundColor: "#2a6a3a",
+    color: "#7fa",
+    border: "1px solid #3a8a4a",
+    borderRadius: 4,
+    fontWeight: 600,
+  },
+  cancelEditBtn: {
+    padding: "4px 10px",
+    fontSize: 12,
+    cursor: "pointer",
+    backgroundColor: "#3a2a2a",
+    color: "#c88",
+    border: "1px solid #5a3a3a",
+    borderRadius: 4,
+  },
+  // ── Drawing section ─────────────────────────────────────────────────────────
   drawSection: {
     marginBottom: 16,
     padding: 12,
@@ -307,6 +496,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid #8a5a2a",
     borderRadius: 4,
   },
+  // ── Legs ────────────────────────────────────────────────────────────────────
   legList: {
     display: "flex",
     flexDirection: "column",

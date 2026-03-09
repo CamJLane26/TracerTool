@@ -54,6 +54,7 @@ function App() {
     deleteRoute,
     addWaypoint,
     removeWaypoint,
+    moveWaypoint,
     updateLegSpeed,
     addMarker,
     removeMarker,
@@ -77,6 +78,7 @@ function App() {
           drawingRouteId={drawingRouteId}
           onUpdateLegSpeed={updateLegSpeed}
           onRemoveWaypoint={removeWaypoint}
+          onMoveWaypoint={moveWaypoint}
           onAddWaypoint={addWaypoint}
           onStartDrawing={startDrawing}
           onFinishDrawing={finishDrawing}

@@ -104,6 +104,39 @@ export function useRouteState() {
     [updateRoute]
   );
 
+  const moveWaypoint = useCallback(
+    (routeId: string, waypointIndex: number, newPosition: Cartesian3) => {
+      let updatedRoute: Route | null = null;
+
+      updateRoute(routeId, (route) => {
+        const newWaypoints = route.waypoints.map((wp, i) =>
+          i === waypointIndex
+            ? { ...wp, position: Cartesian3.clone(newPosition) }
+            : wp
+        );
+        const updated: Route = { ...route, waypoints: newWaypoints };
+        updated.waypoints = computeOffsetTimes(updated);
+        updatedRoute = updated;
+        return updated;
+      });
+
+      // Relocate markers on this route to wherever their offsetTimeMs now falls
+      setMarkers((prevMarkers) =>
+        prevMarkers.map((marker) => {
+          if (marker.routeId !== routeId || !updatedRoute) return marker;
+          const result = positionAtOffsetTime(updatedRoute, marker.offsetTimeMs);
+          if (!result) return marker;
+          return {
+            ...marker,
+            position: Cartesian3.clone(result.position),
+            offsetTimeMs: result.offsetTimeMs,
+          };
+        })
+      );
+    },
+    [updateRoute]
+  );
+
   const updateLegSpeed = useCallback(
     (routeId: string, legIndex: number, speed: number) => {
       // We need the updated route to relocate markers, so capture it here before
@@ -170,6 +203,7 @@ export function useRouteState() {
     deleteRoute,
     addWaypoint,
     removeWaypoint,
+    moveWaypoint,
     updateLegSpeed,
     addMarker,
     removeMarker,
