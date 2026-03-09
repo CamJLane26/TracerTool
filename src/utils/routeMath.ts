@@ -4,7 +4,7 @@ import {
   Ellipsoid,
   EllipsoidGeodesic,
 } from "cesium";
-import type { Route, Waypoint, Leg } from "../types/route";
+import type { Route, Waypoint } from "../types/route";
 
 const MIN_LEG_SPEED = 0.1; // avoid division by zero
 
@@ -177,4 +177,70 @@ export function offsetTimeAtSegment(
   }
 
   return totalMs;
+}
+
+/**
+ * Given a route (with legs that already have correct speeds) and a desired
+ * offsetTimeMs, return the Cartesian3 position that corresponds to that time
+ * and the (possibly clamped) actual offsetTimeMs.
+ *
+ * - Walks leg by leg accumulating duration.
+ * - Interpolates linearly (SLERP via tessellateGeodesic fraction) within the
+ *   matching leg.
+ * - If `desiredOffsetMs` exceeds the total route duration the last waypoints
+ *   position and its offsetTimeMs are returned.
+ */
+export function positionAtOffsetTime(
+  route: Route,
+  desiredOffsetMs: number
+): { position: Cartesian3; offsetTimeMs: number } | null {
+  const { waypoints, legs } = route;
+  if (waypoints.length === 0) return null;
+  if (waypoints.length === 1) {
+    return { position: waypoints[0].position, offsetTimeMs: 0 };
+  }
+
+  let elapsed = 0;
+
+  for (let i = 0; i < legs.length && i + 1 < waypoints.length; i++) {
+    const leg = legs[i];
+    const from = waypoints[leg.fromWaypointIndex]?.position;
+    const to = waypoints[leg.toWaypointIndex]?.position;
+    if (!from || !to) continue;
+
+    const dist = Cartesian3.distance(from, to);
+    const speed = Math.max(leg.speed, MIN_LEG_SPEED);
+    const legDurationMs = (dist / speed) * 1000;
+
+    if (elapsed + legDurationMs >= desiredOffsetMs || i === legs.length - 1) {
+      // The target time falls inside this leg (or we've reached the last leg)
+      const remaining = Math.min(desiredOffsetMs - elapsed, legDurationMs);
+      const fraction = legDurationMs > 0 ? remaining / legDurationMs : 0;
+
+      // Interpolate along the geodesic for this leg
+      const pts = tessellateGeodesic(from, to, 256);
+      const ptIndex = Math.min(
+        Math.floor(fraction * (pts.length - 1)),
+        pts.length - 2
+      );
+      const localFrac = fraction * (pts.length - 1) - ptIndex;
+      const position = Cartesian3.lerp(
+        pts[ptIndex],
+        pts[ptIndex + 1],
+        localFrac,
+        new Cartesian3()
+      );
+
+      return {
+        position,
+        offsetTimeMs: elapsed + remaining,
+      };
+    }
+
+    elapsed += legDurationMs;
+  }
+
+  // Fallback: return last waypoint
+  const last = waypoints[waypoints.length - 1];
+  return { position: last.position, offsetTimeMs: last.offsetTimeMs };
 }

@@ -1,7 +1,7 @@
 import { useState, useCallback } from "react";
 import { Cartesian3 } from "cesium";
 import type { Route, Marker } from "../types/route";
-import { computeOffsetTimes } from "../utils/routeMath";
+import { computeOffsetTimes, positionAtOffsetTime } from "../utils/routeMath";
 
 function generateId(): string {
   return Math.random().toString(36).slice(2, 11);
@@ -106,13 +106,36 @@ export function useRouteState() {
 
   const updateLegSpeed = useCallback(
     (routeId: string, legIndex: number, speed: number) => {
+      // We need the updated route to relocate markers, so capture it here before
+      // dispatching via updateRoute (which only sees the updater fn result).
+      let updatedRoute: Route | null = null;
+
       updateRoute(routeId, (route) => {
         const newLegs = [...route.legs];
         newLegs[legIndex] = { ...newLegs[legIndex], speed };
-        const updated = { ...route, legs: newLegs };
+        const updated: Route = { ...route, legs: newLegs };
         updated.waypoints = computeOffsetTimes(updated);
+        updatedRoute = updated;
         return updated;
       });
+
+      // Relocate any markers associated with this route. We cannot use setRoutes
+      // state from above because it is stale here; instead we use a functional
+      // setMarkers update which receives the current markers snapshot.
+      setMarkers((prevMarkers) =>
+        prevMarkers.map((marker) => {
+          if (marker.routeId !== routeId || !updatedRoute) return marker;
+
+          const result = positionAtOffsetTime(updatedRoute, marker.offsetTimeMs);
+          if (!result) return marker;
+
+          return {
+            ...marker,
+            position: Cartesian3.clone(result.position),
+            offsetTimeMs: result.offsetTimeMs,
+          };
+        })
+      );
     },
     [updateRoute]
   );
